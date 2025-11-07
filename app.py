@@ -27,19 +27,31 @@ app_ui = ui.page_sidebar(
         ui.input_select(
             "plot_type",
             "Plot Type:",
-            {"scatter": "Scatter Plot", "regression": "Regression Plot", "histogram": "Histogram", "box": "Box Plot"},
+            {"scatter": "Scatter Plot", "regression": "Regression Plot", "histogram": "Histogram", "box": "Box Plot", "heatmap": "Heatmap"},
             selected="scatter",
         ),
-        ui.input_select("x", "X-axis:", choices=[]),
         ui.panel_conditional(
-            "['scatter', 'regression', 'box'].includes(input.plot_type)",
-            ui.input_select("y", "Y-axis:", choices=[]),
+            "input.plot_type != 'heatmap'",
+            ui.input_select("x", "X-axis:", choices=[]),
+            ui.panel_conditional(
+                "['scatter', 'regression', 'box'].includes(input.plot_type)",
+                ui.input_select("y", "Y-axis:", choices=[]),
+            ),
+            ui.panel_conditional(
+                "input.plot_type == 'histogram'",
+                ui.input_slider("hist_bins", "Histogram bins:", min=5, max=100, value=30),
+            ),
+            ui.input_select("color", "Color / Group By:", choices=[]),
         ),
         ui.panel_conditional(
-            "input.plot_type == 'histogram'",
-            ui.input_slider("hist_bins", "Histogram bins:", min=5, max=100, value=30),
+            "input.plot_type == 'heatmap'",
+            ui.input_checkbox_group(
+                "heatmap_cols",
+                "Heatmap Columns:",
+                choices=[],
+                selected=[],
+            ),
         ),
-        ui.input_select("color", "Color / Group By:", choices=[]),
     ),
     ui.h2(icon_svg("chart-line"), " NHANES Nutrition Score Dashboard"),
     ui.h3(icon_svg("table"), " Data Preview"),
@@ -125,6 +137,7 @@ def server(input, output, session):
                 deduped_color.append(col)
 
         ui.update_select("color", choices=deduped_color, selected="None", session=session)
+        ui.update_checkbox_group("heatmap_cols", choices=numeric_cols, selected=numeric_cols, session=session)
 
         return df
 
@@ -137,19 +150,67 @@ def server(input, output, session):
     @output
     @render_widget
     def plot():
+        if input.load_btn() == 0:
+            return
         df = load_data()
         meta = data_meta.get()
         numeric_cols = meta.get("numeric_cols", [])
-
         plot_type = input.plot_type()
+
+        if plot_type == "heatmap":
+            if not numeric_cols:
+                raise ValueError("No numeric columns available to create a heatmap.")
+
+            selected_heatmap_cols = input.heatmap_cols()
+            if not selected_heatmap_cols:
+                selected_heatmap_cols = numeric_cols
+
+            selected_heatmap_cols = [col for col in selected_heatmap_cols if col in numeric_cols]
+            if len(selected_heatmap_cols) < 2:
+                raise ValueError("Select at least two numeric columns to create a heatmap.")
+
+            numeric_df = df[selected_heatmap_cols].apply(pd.to_numeric, errors="coerce")
+            numeric_df = numeric_df.dropna(axis=1, how="all")
+
+            if numeric_df.empty:
+                raise ValueError("No valid numeric data available to create a heatmap.")
+
+            corr = numeric_df.corr().fillna(0)
+            fig = px.imshow(
+                corr,
+                text_auto=True,
+                aspect="auto",
+                template="plotly_white",
+                title="Correlation Heatmap of Numeric Variables",
+            )
+            fig.update_layout(height=700)
+            return fig
+
         x_col = input.x()
         y_col = input.y()
+
+        def ensure_axis(current_value, axis_id, fallback_idx=0):
+            if current_value in numeric_cols:
+                return current_value
+            if not numeric_cols:
+                return None
+            idx = min(fallback_idx, len(numeric_cols) - 1)
+            fallback_value = numeric_cols[idx]
+            ui.update_select(axis_id, selected=fallback_value, session=session)
+            return fallback_value
+
+        x_col = ensure_axis(x_col, "x", 0)
 
         color_value = input.color()
         color_col = None if color_value in (None, "None") else color_value
 
         if plot_type in {"scatter", "regression"} and len(numeric_cols) < 2:
             raise ValueError("Select a dataset with at least two numeric columns to create this plot.")
+
+        if plot_type in {"scatter", "regression"}:
+            y_col = ensure_axis(y_col, "y", 1)
+        elif plot_type == "box":
+            y_col = ensure_axis(y_col, "y", 0)
 
         required_columns = []
         required_numeric = []
